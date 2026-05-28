@@ -2,13 +2,11 @@ services:
   - type: web
     name: file-converter-api
     env: python
-    region: singapore   # gần Việt Nam nhất
+    region: singapore
     plan: free
-    buildCommand: |
-      pip install -r requirements.txt
-      apt-get update && apt-get install -y libreoffice ghostscript || true
+    buildCommand: bash build.sh
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ANTHROPIC_API_KEY
-        sync: false   # nhập tay trên Render dashboard
+        sync: false
     healthCheckPath: /
