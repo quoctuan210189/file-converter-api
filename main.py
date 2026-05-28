@@ -1,7 +1,6 @@
 import os
 import uuid
 import shutil
-import subprocess
 import json
 import base64
 from pathlib import Path
@@ -47,9 +46,15 @@ def cleanup(*paths: Path):
 def is_image_ext(ext: str) -> bool:
     return ext.lstrip(".") in IMAGE_EXTS
 
+
+# ── Health check ───────────────────────────────────────────────────────────────
+
 @app.get("/")
 async def health():
     return {"status": "ok", "service": "File Converter API"}
+
+
+# ── AI: phân tích file ─────────────────────────────────────────────────────────
 
 @app.post("/api/ai/process")
 async def ai_process(
@@ -82,11 +87,17 @@ async def ai_process(
             prompt = "Extract all text from this document. Preserve headings, paragraphs, lists, and tables."
         elif tool == "translate":
             lang = opts.get("lang", "vi")
-            lang_names = {"vi":"Vietnamese (tiếng Việt)","en":"English","ja":"Japanese (日本語)","zh":"Chinese (中文)","fr":"French (Français)","ko":"Korean (한국어)","de":"German (Deutsch)","es":"Spanish (Español)"}
+            lang_names = {
+                "vi":"Vietnamese (tiếng Việt)", "en":"English",
+                "ja":"Japanese (日本語)", "zh":"Chinese (中文)",
+                "fr":"French (Français)", "ko":"Korean (한국어)",
+                "de":"German (Deutsch)", "es":"Spanish (Español)",
+            }
             prompt = f"Translate all text to {lang_names.get(lang, lang)}. Return only translated text."
         elif tool == "summarize":
             fmt = opts.get("format", "bullet")
-            prompt = "Summarize as clear bullet points." if fmt == "bullet" else "Write a concise paragraph summary (3–5 sentences)."
+            prompt = ("Summarize as clear bullet points." if fmt == "bullet"
+                      else "Write a concise paragraph summary (3–5 sentences).")
         elif tool == "qa":
             question = opts.get("question", "What is this document about?")
             prompt = f"Answer this question based on the document:\n\n{question}"
@@ -110,78 +121,204 @@ async def ai_process(
     finally:
         cleanup(path)
 
+
+# ── PDF → Word ─────────────────────────────────────────────────────────────────
+
 @app.post("/api/convert/pdf-to-word")
 async def pdf_to_word(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Chỉ chấp nhận file PDF")
+
     path     = save_upload(file)
     out_path = OUTPUT_DIR / f"{uuid.uuid4()}.docx"
+
     try:
         from pdf2docx import Converter
         cv = Converter(str(path))
         cv.convert(str(out_path), start=0, end=None)
         cv.close()
+
         if not out_path.exists():
             raise HTTPException(500, "Không tạo được file DOCX")
-        return FileResponse(str(out_path),
+
+        return FileResponse(
+            str(out_path),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=Path(file.filename).stem + ".docx")
+            filename=Path(file.filename).stem + ".docx",
+        )
     finally:
         cleanup(path)
+
+
+# ── Word → PDF (dùng python-docx + reportlab, không cần LibreOffice) ──────────
 
 @app.post("/api/convert/word-to-pdf")
 async def word_to_pdf(file: UploadFile = File(...)):
     ext = Path(file.filename).suffix.lower()
     if ext not in {".doc", ".docx"}:
         raise HTTPException(400, "Chỉ chấp nhận .doc hoặc .docx")
+
     path     = save_upload(file)
     out_path = OUTPUT_DIR / f"{uuid.uuid4()}.pdf"
+
     try:
-        lo = "/usr/bin/libreoffice"
-        if Path(lo).exists():
-            r = subprocess.run([lo, "--headless", "--convert-to", "pdf",
-                "--outdir", str(OUTPUT_DIR), str(path)],
-                capture_output=True, text=True, timeout=60)
-            if r.returncode != 0:
-                raise HTTPException(500, f"LibreOffice lỗi: {r.stderr}")
-            out_path = OUTPUT_DIR / (path.stem + ".pdf")
-        else:
-            from docx2pdf import convert
-            convert(str(path), str(out_path))
+        from docx import Document
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib import colors
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        import re
+
+        # Đọc nội dung DOCX
+        doc = Document(str(path))
+
+        # Tạo PDF
+        pdf_doc = SimpleDocTemplate(
+            str(out_path),
+            pagesize=A4,
+            rightMargin=2*cm, leftMargin=2*cm,
+            topMargin=2*cm, bottomMargin=2*cm,
+        )
+
+        styles    = getSampleStyleSheet()
+        story     = []
+
+        # Style tùy chỉnh
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=11,
+            leading=16,
+            spaceAfter=6,
+        )
+        h1_style = ParagraphStyle(
+            'CustomH1',
+            parent=styles['Heading1'],
+            fontSize=16,
+            leading=20,
+            spaceAfter=10,
+            spaceBefore=14,
+        )
+        h2_style = ParagraphStyle(
+            'CustomH2',
+            parent=styles['Heading2'],
+            fontSize=13,
+            leading=18,
+            spaceAfter=8,
+            spaceBefore=10,
+        )
+
+        def clean_text(text):
+            # Escape các ký tự đặc biệt trong ReportLab
+            text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            return text
+
+        # Duyệt qua các paragraph trong DOCX
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                story.append(Spacer(1, 6))
+                continue
+
+            style_name = para.style.name.lower()
+
+            if 'heading 1' in style_name:
+                story.append(Paragraph(clean_text(text), h1_style))
+            elif 'heading 2' in style_name:
+                story.append(Paragraph(clean_text(text), h2_style))
+            else:
+                story.append(Paragraph(clean_text(text), normal_style))
+
+        # Duyệt qua các bảng trong DOCX
+        for table in doc.tables:
+            data = []
+            for row in table.rows:
+                row_data = [Paragraph(clean_text(cell.text), normal_style) for cell in row.cells]
+                data.append(row_data)
+
+            if data:
+                t = Table(data, repeatRows=1)
+                t.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#E8E3FF')),
+                    ('TEXTCOLOR',  (0,0), (-1,0), colors.HexColor('#2E2B45')),
+                    ('GRID',       (0,0), (-1,-1), 0.5, colors.HexColor('#E4E1F0')),
+                    ('FONTSIZE',   (0,0), (-1,-1), 10),
+                    ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F8F7FC')]),
+                    ('TOPPADDING',  (0,0), (-1,-1), 6),
+                    ('BOTTOMPADDING',(0,0),(-1,-1), 6),
+                    ('LEFTPADDING', (0,0), (-1,-1), 8),
+                    ('RIGHTPADDING',(0,0), (-1,-1), 8),
+                ]))
+                story.append(Spacer(1, 8))
+                story.append(t)
+                story.append(Spacer(1, 8))
+
+        if not story:
+            story.append(Paragraph("(Tài liệu trống)", normal_style))
+
+        pdf_doc.build(story)
+
         if not out_path.exists():
-            raise HTTPException(500, "Không tạo được PDF")
-        return FileResponse(str(out_path), media_type="application/pdf",
-            filename=Path(file.filename).stem + ".pdf")
-    except subprocess.TimeoutExpired:
-        raise HTTPException(500, "Timeout")
+            raise HTTPException(500, "Không tạo được file PDF")
+
+        return FileResponse(
+            str(out_path),
+            media_type="application/pdf",
+            filename=Path(file.filename).stem + ".pdf",
+        )
+
+    except ImportError as e:
+        raise HTTPException(500, f"Thiếu thư viện: {str(e)}")
     finally:
         cleanup(path)
 
+
+# ── PDF → Image ────────────────────────────────────────────────────────────────
+
 @app.post("/api/convert/pdf-to-image")
-async def pdf_to_image(file: UploadFile = File(...), page: int = Form(0), dpi: int = Form(150), fmt: str = Form("png")):
+async def pdf_to_image(
+    file: UploadFile = File(...),
+    page: int = Form(0),
+    dpi:  int = Form(150),
+    fmt:  str = Form("png"),
+):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Chỉ chấp nhận file PDF")
+
     path     = save_upload(file)
     out_path = OUTPUT_DIR / f"{uuid.uuid4()}.{fmt}"
+
     try:
         doc = fitz.open(str(path))
-        if page >= len(doc): raise HTTPException(400, f"PDF chỉ có {len(doc)} trang")
+        if page >= len(doc):
+            raise HTTPException(400, f"PDF chỉ có {len(doc)} trang")
         pix = doc[page].get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
         pix.save(str(out_path))
         doc.close()
-        return FileResponse(str(out_path),
+        return FileResponse(
+            str(out_path),
             media_type="image/png" if fmt=="png" else "image/jpeg",
-            filename=f"{Path(file.filename).stem}_page{page+1}.{fmt}")
+            filename=f"{Path(file.filename).stem}_page{page+1}.{fmt}",
+        )
     finally:
         cleanup(path)
 
+
+# ── Merge PDF ──────────────────────────────────────────────────────────────────
+
 @app.post("/api/convert/merge-pdf")
 async def merge_pdf(files: list[UploadFile] = File(...)):
-    if len(files) < 2: raise HTTPException(400, "Cần ít nhất 2 file PDF")
+    if len(files) < 2:
+        raise HTTPException(400, "Cần ít nhất 2 file PDF")
+
     paths = []; out_path = OUTPUT_DIR / f"{uuid.uuid4()}.pdf"
     try:
         for f in files:
-            if not f.filename.lower().endswith(".pdf"): raise HTTPException(400, f"'{f.filename}' không phải PDF")
+            if not f.filename.lower().endswith(".pdf"):
+                raise HTTPException(400, f"'{f.filename}' không phải PDF")
             paths.append(save_upload(f))
         merged = fitz.open()
         for p in paths:
@@ -191,9 +328,14 @@ async def merge_pdf(files: list[UploadFile] = File(...)):
     finally:
         for p in paths: cleanup(p)
 
+
+# ── Split PDF ──────────────────────────────────────────────────────────────────
+
 @app.post("/api/convert/split-pdf")
 async def split_pdf(file: UploadFile = File(...), pages: str = Form(...)):
-    if not file.filename.lower().endswith(".pdf"): raise HTTPException(400, "Chỉ chấp nhận file PDF")
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Chỉ chấp nhận file PDF")
+
     path = save_upload(file); out_path = OUTPUT_DIR / f"{uuid.uuid4()}.pdf"
     try:
         doc = fitz.open(str(path)); total = len(doc)
@@ -215,28 +357,42 @@ async def split_pdf(file: UploadFile = File(...), pages: str = Form(...)):
     finally:
         cleanup(path)
 
+
+# ── Compress PDF ───────────────────────────────────────────────────────────────
+
 @app.post("/api/convert/compress-pdf")
 async def compress_pdf(file: UploadFile = File(...), level: str = Form("medium")):
-    if not file.filename.lower().endswith(".pdf"): raise HTTPException(400, "Chỉ chấp nhận file PDF")
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Chỉ chấp nhận file PDF")
+
     path = save_upload(file); out_path = OUTPUT_DIR / f"{uuid.uuid4()}.pdf"
-    gs_quality = {"low":"/screen","medium":"/ebook","high":"/printer"}.get(level,"/ebook")
     try:
-        r = subprocess.run(["gs","-sDEVICE=pdfwrite","-dCompatibilityLevel=1.4",
-            f"-dPDFSETTINGS={gs_quality}","-dNOPAUSE","-dQUIET","-dBATCH",
-            f"-sOutputFile={out_path}",str(path)],
-            capture_output=True, text=True, timeout=120)
-        if r.returncode != 0: raise HTTPException(500, f"Ghostscript lỗi: {r.stderr}")
-        orig = path.stat().st_size; comp = out_path.stat().st_size
-        resp = FileResponse(str(out_path), media_type="application/pdf",
-            filename=f"{Path(file.filename).stem}_compressed.pdf")
+        # Dùng PyMuPDF để nén — không cần Ghostscript
+        doc = fitz.open(str(path))
+        # Garbage collect và deflate để giảm kích thước
+        doc.save(
+            str(out_path),
+            garbage=4,       # xóa object thừa
+            deflate=True,    # nén stream
+            clean=True,      # clean content streams
+        )
+        doc.close()
+
+        orig = path.stat().st_size
+        comp = out_path.stat().st_size
+        reduction = round((1 - comp / orig) * 100, 1)
+
+        resp = FileResponse(
+            str(out_path), media_type="application/pdf",
+            filename=f"{Path(file.filename).stem}_compressed.pdf",
+        )
         resp.headers["X-Original-Size"]   = str(orig)
         resp.headers["X-Compressed-Size"] = str(comp)
-        resp.headers["X-Reduction"]       = str(round((1-comp/orig)*100,1))
+        resp.headers["X-Reduction"]       = str(reduction)
         return resp
-    except FileNotFoundError:
-        raise HTTPException(500, "Ghostscript chưa cài trên server")
     finally:
         cleanup(path)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
