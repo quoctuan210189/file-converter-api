@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Admin — FileConvert AI</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#F8F7FC;color:#2E2B45;padding:24px}
+h1{font-size:20px;font-weight:600;margin-bottom:20px;color:#18172B}
+.card{background:#fff;border:1px solid #E4E1F0;border-radius:12px;padding:20px;margin-bottom:16px}
+h2{font-size:15px;font-weight:600;margin-bottom:14px;color:#5C5880}
+.form-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+input,select{padding:8px 12px;border:1px solid #E4E1F0;border-radius:7px;font-size:13px;
+             font-family:inherit;background:#F8F7FC;color:#2E2B45;min-width:200px}
+input:focus,select:focus{outline:none;border-color:#6C4FD4;background:#fff}
+.btn{padding:8px 16px;border:none;border-radius:7px;font-size:13px;font-family:inherit;
+     cursor:pointer;font-weight:500}
+.btn-primary{background:#6C4FD4;color:#fff}
+.btn-primary:hover{opacity:.88}
+.btn-green{background:#1B8A54;color:#fff}
+.notice{padding:10px 12px;border-radius:7px;font-size:13px;margin-top:10px;display:none}
+.notice.ok{background:#EDFAF4;color:#1B8A54}
+.notice.err{background:#FEF0F0;color:#C0392B}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 10px;border-bottom:2px solid #E4E1F0;
+   font-size:11px;font-weight:600;color:#9993B8;text-transform:uppercase}
+td{padding:8px 10px;border-bottom:1px solid #F0EEF8}
+.badge{padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge.pending{background:#FEF6E7;color:#B45309}
+.badge.completed{background:#EDFAF4;color:#1B8A54}
+.badge.basic{background:#E0F2FE;color:#0369A1}
+.badge.pro{background:#FEF6E7;color:#B45309}
+.badge.free{background:#F0EEF8;color:#9993B8}
+</style>
+</head>
+<body>
+<h1>🛠 FileConvert AI — Admin Panel</h1>
+
+<div class="card">
+  <h2>🔐 Xác thực</h2>
+  <div class="form-row">
+    <input type="password" id="admin-secret" placeholder="Admin secret key"/>
+    <button class="btn btn-primary" id="btn-load">Tải dữ liệu</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>✅ Xác nhận đơn hàng (chuyển khoản)</h2>
+  <div class="form-row">
+    <input type="text" id="order-id" placeholder="Order ID (VD: FC-AB12CD34EF)"/>
+    <button class="btn btn-green" id="btn-confirm">Xác nhận đã nhận tiền</button>
+  </div>
+  <div class="notice" id="confirm-notice"></div>
+</div>
+
+<div class="card">
+  <h2>👤 Thay đổi plan user</h2>
+  <div class="form-row">
+    <input type="email" id="user-email-plan" placeholder="Email user"/>
+    <select id="new-plan">
+      <option value="free">Free</option>
+      <option value="basic">Basic</option>
+      <option value="pro">Pro</option>
+    </select>
+    <button class="btn btn-primary" id="btn-set-plan">Cập nhật plan</button>
+  </div>
+  <div class="notice" id="plan-notice"></div>
+</div>
+
+<div class="card">
+  <h2>📋 Đơn hàng gần đây</h2>
+  <table id="orders-table">
+    <thead>
+      <tr>
+        <th>Order ID</th><th>Email</th><th>Plan</th>
+        <th>Số tiền</th><th>Phương thức</th><th>Trạng thái</th><th>Thời gian</th><th>Hành động</th>
+      </tr>
+    </thead>
+    <tbody id="orders-body">
+      <tr><td colspan="8" style="text-align:center;color:#9993B8;padding:20px">Nhập secret key và tải dữ liệu</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+const API = location.origin;
+let adminSecret = '';
+
+function fmt(n) { return new Intl.NumberFormat('vi').format(n) + 'đ'; }
+function fmtDate(s) { return s ? new Date(s).toLocaleString('vi') : '—'; }
+function showNotice(id, msg, ok) {
+  const el = document.getElementById(id);
+  el.textContent = msg; el.className = `notice ${ok?'ok':'err'}`; el.style.display='block';
+  setTimeout(() => el.style.display='none', 4000);
+}
+
+document.getElementById('btn-load').addEventListener('click', async () => {
+  adminSecret = document.getElementById('admin-secret').value.trim();
+  if (!adminSecret) return alert('Nhập secret key');
+  await loadOrders();
+});
+
+async function loadOrders() {
+  try {
+    const res  = await fetch(`${API}/api/admin/orders?secret=${encodeURIComponent(adminSecret)}`);
+    const data = await res.json();
+    if (!res.ok) { alert(data.detail || 'Lỗi'); return; }
+    renderOrders(data);
+  } catch { alert('Lỗi kết nối'); }
+}
+
+function renderOrders(orders) {
+  const tbody = document.getElementById('orders-body');
+  if (!orders.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#9993B8;padding:20px">Chưa có đơn nào</td></tr>';
+    return;
+  }
+  tbody.innerHTML = orders.map(o => `
+    <tr>
+      <td><code>${o.id}</code></td>
+      <td>${o.user_email||'—'}</td>
+      <td><span class="badge ${o.plan}">${o.plan}</span></td>
+      <td>${fmt(o.amount)}</td>
+      <td>${o.method}</td>
+      <td><span class="badge ${o.status}">${o.status==='pending'?'Chờ xác nhận':'Đã xong'}</span></td>
+      <td>${fmtDate(o.created_at)}</td>
+      <td>${o.status==='pending' ? `<button class="btn btn-green" onclick="confirmOrder('${o.id}')" style="padding:4px 10px;font-size:12px">Xác nhận</button>` : '—'}</td>
+    </tr>`).join('');
+}
+
+async function confirmOrder(orderId) {
+  if (!confirm(`Xác nhận đơn ${orderId}?`)) return;
+  document.getElementById('order-id').value = orderId;
+  document.getElementById('btn-confirm').click();
+}
+
+document.getElementById('btn-confirm').addEventListener('click', async () => {
+  const orderId = document.getElementById('order-id').value.trim();
+  if (!orderId) { showNotice('confirm-notice','Nhập Order ID',false); return; }
+  try {
+    const fd = new FormData();
+    fd.append('order_id', orderId);
+    fd.append('admin_secret', adminSecret);
+    const res  = await fetch(`${API}/api/payment/confirm-order`, { method:'POST', body:fd });
+    const data = await res.json();
+    if (res.ok) { showNotice('confirm-notice','✓ Xác nhận thành công! Plan đã được nâng cấp.',true); await loadOrders(); }
+    else showNotice('confirm-notice', data.detail||'Lỗi', false);
+  } catch { showNotice('confirm-notice','Lỗi kết nối',false); }
+});
+
+document.getElementById('btn-set-plan').addEventListener('click', async () => {
+  const email = document.getElementById('user-email-plan').value.trim();
+  const plan  = document.getElementById('new-plan').value;
+  if (!email) { showNotice('plan-notice','Nhập email',false); return; }
+  try {
+    const fd = new FormData();
+    fd.append('email', email); fd.append('plan', plan); fd.append('admin_secret', adminSecret);
+    const res  = await fetch(`${API}/api/admin/set-plan`, { method:'POST', body:fd });
+    const data = await res.json();
+    if (res.ok) showNotice('plan-notice',`✓ Đã đổi plan ${email} → ${plan}`,true);
+    else showNotice('plan-notice', data.detail||'Lỗi', false);
+  } catch { showNotice('plan-notice','Lỗi kết nối',false); }
+});
+</script>
+</body>
+</html>
